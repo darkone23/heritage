@@ -3,12 +3,14 @@
 {
   # https://devenv.sh/basics/
   # env.GREET = "devenv";
+  env.GIT_EXTERNAL_DIFF = "difft";
 
   # https://devenv.sh/packages/
   packages = [
     pkgs.git
     pkgs.black
     pkgs.python3Packages.python-lsp-server
+    pkgs.difftastic
   ];
 
   # https://devenv.sh/languages/

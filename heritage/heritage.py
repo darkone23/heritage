@@ -128,17 +128,19 @@ class TreeScopedCache:
         self.h = heritage
         self.cache = {}
 
-    def get_lexicon_entry(self, lexicon_id, entry_id):
+    def get_lexicon_entry(self, lexicon_id, entry_id, variant=None):
         """
         Checks cache before fetching lexicon entry.
         """
-        cache_key = (lexicon_id, entry_id)
+        cache_key = (lexicon_id, entry_id, variant)
 
         if cache_key in self.cache:
             return self.cache[cache_key]  # Return cached result
 
         # Fetch fresh data
-        result = self.h.get_lexicon_entry(lexicon_id, entry_id)
+        result = self.h.get_lexicon_entry(lexicon_id, entry_id, variant)
+
+        result["lexicon_entry"] = cache_key if variant else (lexicon_id, entry_id)
 
         # Store only for this tree instance
         self.cache[cache_key] = result
@@ -187,17 +189,58 @@ class HeritageOutput:
 
     def find_root_analysis(self, analysis):
         analyses = []
+
         # print("you want analysis?", analysis)
+        def append_if_not_already(obj):
+            has_item_already = False
+            for x in analyses:
+                has_item_already = (
+                    x["root"] == obj["root"] and x["anchor_href"] == obj["anchor_href"]
+                )
+                if has_item_already:
+                    break
+            if not has_item_already:
+                analyses.append(obj)
+
         parts = str(analysis).split("<br/>")
         for part in parts:
             # el = part
-            soup = bs4.BeautifulSoup(part, "html.parser")
+            head = None
+            tail = None
+            (head, tail) = part.split("]{")
+            head = head[1:]
+            tail = tail[:-1]
+
+            # print("h:", head)
+            # print("t:", tail)
+
+            soup = bs4.BeautifulSoup(head, "html.parser")
             anchor = soup.find("a")
-            anchor_txt = anchor.get_text().split("_")[0]
+
+            if anchor is None:
+                # print("interesting anchor?", soup, anchor)
+                # soupstr = str(soup)
+                # head = soupstr.split("]")[0][1:]
+                # tail = soupstr.split("{")[-1][:-1]
+                obj = {
+                    "root": head,
+                    "analyses": tail.split(" "),
+                    "anchor_href": "",
+                }
+                append_if_not_already(obj)
+                continue
+
+            # anchor_txt = anchor.get_text().split("_")[0]
             anchor_href = anchor.get("href")
             # extract lexicon
-            anchor.decompose()
-            root_txt = str(soup)[3:-1]
+            # anchor.decompose()
+            root_txt = tail
+
+            if "{" in head:
+                head_root = head.split("{")[1].split("}")[0]
+                root_txt = f"{head_root} | {root_txt}"
+
+            # print("rooty", root_txt)
             roots = []
             root_chunks = root_txt.split("|")
             # print("part", anchor_txt, root_txt)
@@ -215,17 +258,21 @@ class HeritageOutput:
                 # chunk.replace(r'', )
                 term_analyses.append(chunk_parts)
             lexicon_sections = anchor_href.split("/")[-1].split("#")
-            lexicon = (lexicon_sections[0], lexicon_sections[1])
-            analyses.append(
-                dict(
-                    root=anchor_txt,
-                    lexicon=lexicon,
-                    # lexicon_section=lexicon_sections,
-                    # href=anchor_href,
-                    analyses=term_analyses,
-                )
+            # lexicon = (lexicon_sections[0], lexicon_sections[1])
+            lexicon = tuple(lexicon_sections)
+            obj = dict(
+                root=soup.get_text().split(" ")[0],
+                anchor_href=anchor_href,
+                lexicon=lexicon,
+                # lexicon_section=lexicon_sections,
+                # href=anchor_href,
+                analyses=term_analyses,
             )
+            append_if_not_already(obj)
+            # else:
+            #     print("skipping I think a dupe")
             # print("part", "[<a"+ part)
+        # print(analyses)
         return analyses
 
     def extract_segmenter_output(self, meta: bool = False):
@@ -289,6 +336,24 @@ class HeritageOutput:
             # print(term, entries, categories[term])
             # css_classes = categories[term]
             word_forms = []
+
+            def add_if_not_already(word_analysis):
+                has_item_already = False
+                for x in word_forms:
+                    has_item_already = (
+                        # TODO: check analyses line
+                        x["category"] == word_analysis["category"]
+                        and x["root"] == word_analysis["root"]
+                        and x["anchor_href"] == word_analysis["anchor_href"]
+                    )
+                    if has_item_already:
+                        # print("comparing!", x)
+                        # print("compared!", word_analysis)
+                        # print("skipping other dupe")
+                        break
+                if not has_item_already:
+                    word_forms.append(word_analysis)
+
             word = dict(
                 text=term,
             )
@@ -300,12 +365,16 @@ class HeritageOutput:
                     HERITAGE_COLOURS.get(css_class.split("_back")[0], None)
                     for css_class in css_classes
                 ]
+                if len(word_entry["category"]) == 1:
+                    word_entry["category"] = word_entry["category"][0]
                 # word_entry["soup"] = analysis
                 for analysis in self.find_root_analysis(analysis):
                     word_analysis = word_entry.copy()
                     word_analysis.update(analysis)
-                    word_forms.append(word_analysis)
+                    add_if_not_already(word_analysis)
                 # word_copy.update(analysis)
+            for word in word_forms:
+                del word["anchor_href"]
             words.append(word_forms)
 
             # words.append(dict(
@@ -523,6 +592,7 @@ class HeritageOutput:
                 ref_parts = green.get("href").split("#")
                 green_page = None
                 green_term = None
+                remainder = []
                 if len(ref_parts) == 1:
                     (t) = ref_parts
                     green_page = file_name
@@ -532,8 +602,13 @@ class HeritageOutput:
                     green_page = p
                     green_term = t
                 else:
-                    raise ValueError(f"Unexpected ref: {blue}")
-                alt_forms[blue] = (green_page, green_term)
+                    green_page = ref_parts[0]
+                    green_term = ref_parts[1]
+                    remainder = ref_parts[2:]
+                    # raise ValueError(f"Unexpected ref: {blue}")
+                if not green_page:
+                    green_page = file_name
+                alt_forms[blue] = tuple([green_page, green_term] + remainder)
                 # print(green) # should be a map[blue] = (file, ref)
                 # pass
                 # pass
@@ -573,7 +648,7 @@ class HeritageOutput:
             "definition": definition,
         }
 
-    def find_lexicon_entry(self, file_name, entry_id):
+    def find_lexicon_entry(self, file_name, entry_id, variant=None):
         """
         Fetches a lexicon entry while checking alternative forms.
         """
@@ -601,21 +676,23 @@ class HeritageOutput:
         ]
 
         # Try numbered variants (e.g., "H_raa#1", "H_raa#2")
+        variant_part = "#"
+        if variant:
+            variant_part += variant
         numbered_variants = [
-            m for m in available_markers if m.startswith(entry_id + "#")
+            m for m in available_markers if m.startswith(entry_id + variant_part)
         ]
 
-        if numbered_variants:
-            # TODO: this means we are dropping the other variants # n+1...
+        if len(numbered_variants):
             best_match = numbered_variants[0]  # Use first available match
             # print(f"[DEBUG] Using alternative lexicon marker: {best_match}")
             return self.find_lexicon_entry(file_name, best_match)
 
         raise ValueError(f"Lexicon entry for '{entry_id}' not found.")
 
-    def extract_lexicon_entry(self, file_name: str, word_id: str):
+    def extract_lexicon_entry(self, file_name: str, word_id: str, variant=None):
         """Extract entry from a lexicon"""
-        parent = self.find_lexicon_entry(file_name, word_id)
+        parent = self.find_lexicon_entry(file_name, word_id, variant)
         # print("I found this parent do you like it?", parent)
         return self.parse_lexicon_entry(file_name, parent)
 
@@ -764,6 +841,8 @@ class HeritagePlatform:
         for option in self.OPTIONS:
             self.options[option] = self.OPTIONS[option]["default"]
 
+        self.web_url_cache = {}
+
     ###########################################################################
     # Utilities (Actions)
 
@@ -844,10 +923,13 @@ class HeritagePlatform:
             for word_group in token_data["words"]:
                 enriched_words = []
                 for word in word_group:
-                    lexicon_id, entry_id = word["lexicon"]
+                    lexicon = word.get("lexicon", None)
+                    # print("getting da word", lexicon)
 
                     # Fetch lexicon data for this word
-                    lexicon_entry = cache.get_lexicon_entry(lexicon_id, entry_id)
+                    lexicon_entry = None
+                    if lexicon:
+                        lexicon_entry = cache.get_lexicon_entry(*lexicon)
 
                     # Merge lexicon data into the word structure
                     enriched_word = {
@@ -1090,7 +1172,7 @@ class HeritagePlatform:
 
     ###########################################################################
 
-    def get_lexicon_entry(self, file_name: str, word_id: str):
+    def get_lexicon_entry(self, file_name: str, word_id: str, variant=None):
         if self.method == "shell":
             path = self.get_path("dictionary")
             file_path = os.path.join(path, file_name)
@@ -1106,7 +1188,7 @@ class HeritagePlatform:
 
         # print("do you like content?", content)
         output = HeritageOutput(content)
-        return output.extract_lexicon_entry(file_name, word_id)
+        return output.extract_lexicon_entry(file_name, word_id, variant)
 
     ###########################################################################
     # Fetch Result through Web or Shell
@@ -1137,6 +1219,7 @@ class HeritagePlatform:
         query_url = f"{url}?{query_string}"
         return self.__get(query_url, attempts=attempts)
 
+    # @functools.cache
     def __get(self, query_url: str, attempts: int = 3):
         """
         Query web with exponential-backoff
@@ -1154,6 +1237,10 @@ class HeritagePlatform:
         str
             Result (HTML) obtained
         """
+        query_url = query_url.split("#")[0]  # hash is not sent to server
+        if query_url in self.web_url_cache:
+            return self.web_url_cache[query_url]
+        # print("IM INSIDE!!!", query_url, type(self))
         # query with exponential-backoff
         r = requests.get(query_url)
         if r.status_code != 200:
@@ -1174,7 +1261,8 @@ class HeritagePlatform:
             else:
                 self.logger.warning(f"Failed on '{query_url}' after {n} attempts.")
         r.encoding = r.apparent_encoding
-        return r.text
+        self.web_url_cache[query_url] = r.text
+        return self.web_url_cache[query_url]
 
     # ----------------------------------------------------------------------- #
 
