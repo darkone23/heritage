@@ -3,7 +3,19 @@ Heritage.py
 ===========
 
 personal fork of: https://github.com/hrishikeshrt/heritage
+
 - adding new sentence segmenter & lexicon support
+
+note:
+
+- heritage platform is computationally intensive
+- this library consists of reading and parsing large chunks of text
+- can read heritage response txt over http or via local binaries
+  - either way: still must read/compute large dataset
+
+performance improvements require local caching
+
+- basic version via something like sqlite
 
 .. image:: https://img.shields.io/pypi/v/heritage
         :target: https://pypi.python.org/pypi/heritage

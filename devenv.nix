@@ -9,6 +9,7 @@
   packages = [
     pkgs.git
     pkgs.black
+    pkgs.sqlite
     pkgs.python3Packages.python-lsp-server
     pkgs.difftastic
   ];

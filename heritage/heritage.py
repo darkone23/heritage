@@ -32,6 +32,7 @@ import io
 import sys
 import re
 import time
+import json
 import random
 import signal
 import logging
@@ -48,6 +49,7 @@ import bs4
 
 from .constants import HERITAGE_COLOURS
 from .utils import build_query_string, devanagari_to_velthuis
+from .db import SQLiteCache
 
 ###############################################################################
 # TODO: Do we need to use python-frozendict (PyPI)?
@@ -126,7 +128,7 @@ class TreeScopedCache:
 
     def __init__(self, heritage):
         self.h = heritage
-        self.cache = {}
+        self.sqlite_kv = SQLiteCache(SQLiteCache.get_cache_dir() / "lexicon.db")
 
     def get_lexicon_entry(self, lexicon_id, entry_id, variant=None):
         """
@@ -134,8 +136,12 @@ class TreeScopedCache:
         """
         cache_key = (lexicon_id, entry_id, variant)
 
-        if cache_key in self.cache:
-            return self.cache[cache_key]  # Return cached result
+        existing = self.sqlite_kv.get(str(cache_key))
+        if existing:
+            return json.loads(existing)
+        # if cache_key in self.cache:
+        #     return self.cache()
+        #     return self.cache[cache_key]  # Return cached result
 
         # Fetch fresh data
         result = self.h.get_lexicon_entry(lexicon_id, entry_id, variant)
@@ -143,7 +149,7 @@ class TreeScopedCache:
         result["lexicon_entry"] = cache_key if variant else (lexicon_id, entry_id)
 
         # Store only for this tree instance
-        self.cache[cache_key] = result
+        self.sqlite_kv.set(str(cache_key), json.dumps(result))
         return result
 
 
@@ -841,7 +847,7 @@ class HeritagePlatform:
         for option in self.OPTIONS:
             self.options[option] = self.OPTIONS[option]["default"]
 
-        self.web_url_cache = {}
+        self.sqlite_kv = SQLiteCache(SQLiteCache.get_cache_dir() / "lexicon.db")
 
     ###########################################################################
     # Utilities (Actions)
@@ -1238,8 +1244,11 @@ class HeritagePlatform:
             Result (HTML) obtained
         """
         query_url = query_url.split("#")[0]  # hash is not sent to server
-        if query_url in self.web_url_cache:
-            return self.web_url_cache[query_url]
+        existing = self.sqlite_kv.get(query_url)
+        if existing:
+            return existing
+        # if query_url in self.web_url_cache:
+        #     return self.web_url_cache[query_url]
         # print("IM INSIDE!!!", query_url, type(self))
         # query with exponential-backoff
         r = requests.get(query_url)
@@ -1261,8 +1270,10 @@ class HeritagePlatform:
             else:
                 self.logger.warning(f"Failed on '{query_url}' after {n} attempts.")
         r.encoding = r.apparent_encoding
-        self.web_url_cache[query_url] = r.text
-        return self.web_url_cache[query_url]
+        self.sqlite_kv.set(query_url, r.text)
+        return self.sqlite_kv.get(query_url)
+        # self.web_url_cache[query_url] = r.text
+        # return self.web_url_cache[query_url]
 
     # ----------------------------------------------------------------------- #
 
