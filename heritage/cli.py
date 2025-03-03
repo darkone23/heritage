@@ -16,14 +16,10 @@ from . import HeritagePlatform
 def main():
     """Console script for Heritage.py"""
     home_dir = os.path.expanduser("~")
-    heritage_dir = os.path.join(
-        home_dir, "git", "heritage", "Heritage_Platform"
-    )
+    heritage_dir = os.path.join(home_dir, "git", "heritage", "Heritage_Platform")
     SH = HeritagePlatform(heritage_dir)  # noqa
 
-    parser = argparse.ArgumentParser(
-        description="Console Script for Heritage.py"
-    )
+    parser = argparse.ArgumentParser(description="Console Script for Heritage.py")
     args = parser.parse_args()
 
     print("Arguments: " + str(args._))

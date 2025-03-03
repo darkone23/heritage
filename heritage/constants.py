@@ -38,6 +38,7 @@ HERITAGE_COLOURS = {
     # Actually, complex compounds with n+1 components appear as a
     # sequence of n yellow segments denoting stems, followed by a blue
     # nominal inflected form.
+    "sky_blue": "pronoun",
     "cyan": "exocentric compound",  # बहुव्रीहि समास
     # The cyan colour segment may not occur stand-alone,
     # it is mandatorily preceded by a yellow segment in order to form
@@ -66,7 +67,7 @@ HERITAGE_COLOURS = {
     # Here, the right part is either red for verbal forms, e.g मृदूभवति
     # blue for participial forms, like कदर्थीकृतः
     # or mauve for absolutives and infinitives, like निमित्तीकृत्य
-    "carmin": "special infinitive form"
+    "carmin": "special infinitive form",
     # e.g. First part of वक्तुकामः
 }
 

@@ -28,15 +28,20 @@ Using Local Installation
 ###############################################################################
 
 import os
+import io
+import sys
 import re
 import time
 import random
 import signal
 import logging
 import functools
-import subprocess
+
+# import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
+
+import sh
 
 import requests
 import bs4
@@ -66,8 +71,7 @@ def freezeargs(func):
             [frozendict(arg) if isinstance(arg, dict) else arg for arg in args]
         )
         kwargs = {
-            k: frozendict(v) if isinstance(v, dict) else v
-            for k, v in kwargs.items()
+            k: frozendict(v) if isinstance(v, dict) else v for k, v in kwargs.items()
         }
         return func(*args, **kwargs)
 
@@ -113,6 +117,34 @@ class Token:
 ###############################################################################
 
 
+class TreeScopedCache:
+    """
+    Caches lexicon lookups for the lifetime of a single parse tree.
+
+    lets instances of this class get garbage collected
+    """
+
+    def __init__(self, heritage):
+        self.h = heritage
+        self.cache = {}
+
+    def get_lexicon_entry(self, lexicon_id, entry_id):
+        """
+        Checks cache before fetching lexicon entry.
+        """
+        cache_key = (lexicon_id, entry_id)
+
+        if cache_key in self.cache:
+            return self.cache[cache_key]  # Return cached result
+
+        # Fetch fresh data
+        result = self.h.get_lexicon_entry(lexicon_id, entry_id)
+
+        # Store only for this tree instance
+        self.cache[cache_key] = result
+        return result
+
+
 class HeritageOutput:
     """
     Heritage Output Parser
@@ -153,6 +185,214 @@ class HeritageOutput:
         # Find Relevant Body Children
         self.blocks = self.body.find_all()
 
+    def find_root_analysis(self, analysis):
+        analyses = []
+        # print("you want analysis?", analysis)
+        parts = str(analysis).split("<br/>")
+        for part in parts:
+            # el = part
+            soup = bs4.BeautifulSoup(part, "html.parser")
+            anchor = soup.find("a")
+            anchor_txt = anchor.get_text().split("_")[0]
+            anchor_href = anchor.get("href")
+            # extract lexicon
+            anchor.decompose()
+            root_txt = str(soup)[3:-1]
+            roots = []
+            root_chunks = root_txt.split("|")
+            # print("part", anchor_txt, root_txt)
+            term_analyses = []
+            for chunk in root_chunks:
+                chunk_sub = chunk
+                if "." in chunk:  # must be roma
+                    chunk_sub = re.sub(r"[\[\]\.0-9]", "", chunk).strip()
+                chunk_sub = re.sub(r" +", " ", chunk_sub).split(" ")
+                chunk_parts = []
+                for s in chunk_sub:
+                    if s:
+                        chunk_parts.append(s)
+                # print("turned", chunk, chunk_parts)
+                # chunk.replace(r'', )
+                term_analyses.append(chunk_parts)
+            lexicon_sections = anchor_href.split("/")[-1].split("#")
+            lexicon = (lexicon_sections[0], lexicon_sections[1])
+            analyses.append(
+                dict(
+                    root=anchor_txt,
+                    lexicon=lexicon,
+                    # lexicon_section=lexicon_sections,
+                    # href=anchor_href,
+                    analyses=term_analyses,
+                )
+            )
+            # print("part", "[<a"+ part)
+        return analyses
+
+    def extract_segmenter_output(self, meta: bool = False):
+        soup = bs4.BeautifulSoup(self.html, "html.parser")
+        solution = {}
+        # solution["id"] = 0
+        words = []
+        solution["words"] = words
+
+        tables = soup.find_all("table")
+        terms = {}
+        categories = {}
+        for table in tables:
+            table_txt = table.get_text().strip()
+            if "Chunks" in table_txt:
+                continue
+            if "Solutions" in table_txt:
+                continue
+            if "Grammar" in table_txt:
+                continue
+            if table_txt == "":
+                # print("skipping empty", table)
+                continue
+            if " " in table_txt:
+                # print("contains spaces.. probably should skip")
+                continue
+            t_class = table.get("class")
+            # if table.get("class"):
+            # if table["classes"]:
+            #     print("wow classes")
+            if t_class:
+                # print("amazing a tclass", t_class)
+                if t_class == ["center"]:
+                    # print("no use in messing with this...")
+                    continue
+            # print("checking", table_txt.strip())
+            # print("wow table", table)
+            soup = table
+            # TODO: pretty brittle start/end
+            thingy = bs4.BeautifulSoup(
+                soup.find("td").get("onclick")[9:-63], "html.parser"
+            )
+            # print("wow thing", thingy.get_text())
+            datum = terms.get(table_txt, {})
+            entries = datum.get("entries", [])
+            categories = datum.get("categories", [])
+            entries.append(thingy)
+            categories.append(t_class)
+            # TODO: if term is repeated table_txt wipes out entries...
+            # test output on the mahamantra example
+            terms[table_txt] = dict(
+                entries=entries,
+                categories=categories,
+            )
+
+        words = []
+        for term, datum in terms.items():
+            # print("welcome to term", term)
+            entries = datum.get("entries")
+            categories = datum.get("categories")
+            # print(term, entries, categories[term])
+            # css_classes = categories[term]
+            word_forms = []
+            word = dict(
+                text=term,
+            )
+            for n in range(len(entries)):
+                analysis = entries[n]
+                css_classes = categories[n]
+                word_entry = word.copy()
+                word_entry["category"] = [
+                    HERITAGE_COLOURS.get(css_class.split("_back")[0], None)
+                    for css_class in css_classes
+                ]
+                # word_entry["soup"] = analysis
+                for analysis in self.find_root_analysis(analysis):
+                    word_analysis = word_entry.copy()
+                    word_analysis.update(analysis)
+                    word_forms.append(word_analysis)
+                # word_copy.update(analysis)
+            words.append(word_forms)
+
+            # words.append(dict(
+            #     text=term,
+            #     category = [ ],
+            # ))
+
+        solution["id"] = 0
+        solution["words"] = words
+
+        return {"0": solution}
+        # return self.extract_reader_inner(self.html, meta)
+
+    def extract_reader_inner(self, block, meta: bool = False):
+        if "Solution" not in block:
+            # print("MYSTERYBEGIN")
+            # print(block)
+            # print("MYSTERYEND")
+            return ("nothing", None)
+            # raise ValueError("What is this block?")
+
+        solution = {}
+
+        soup = bs4.BeautifulSoup(block, "html.parser")
+        solution_id = None
+        first_span = soup.find("span")
+        solution_id = int(first_span.text.split()[1])
+
+        solution["id"] = solution_id
+        solution["words"] = []
+
+        if meta:
+            parser_url = first_span.find("a")["href"]
+            # TODO: Better parsing of options
+            parser_options = dict(
+                [e.split("=") for e in re.split(r"&amp;|&|;", parser_url.split("?")[1])]
+            )
+            solution["parser_options"] = parser_options
+
+        tables = soup.find_all("table")
+        for table in tables:
+            if table.find("table"):
+                word = {}
+                word["text"] = table.previous_sibling.get_text()
+            else:
+                # Inner table contains analysis and it occurs after
+                # the original word
+                table_txt = table.get_text()
+                self.logger.debug(table_txt)
+                analyses = self.parse_reader_analysis(table)
+                self.logger.debug(analyses)
+                css_classes = table.get("class", [])
+                if meta:
+                    word["classes"] = css_classes
+                word["category"] = [
+                    HERITAGE_COLOURS.get(css_class.split("_back")[0], None)
+                    for css_class in css_classes
+                ]
+                word_analyses = []
+                for analysis in analyses:
+                    # word_copy = word.copy()
+                    # print(word)
+                    word_copy = {
+                        "text": word["text"],
+                        "category": word["category"],
+                        # "variant": analysis,
+                    }
+                    word_copy.update(analysis)
+                    word_analyses.append(word_copy)
+                solution["words"].append(word_analyses)
+
+        return solution_id, solution
+
+    def extract_reader_output(self, meta: bool = False):
+        hr_blocks = self.html.split("<hr>")
+        if len(hr_blocks) < 2:
+            # print(self.html)
+            self.logger.error("No solutions found.")
+            return None
+
+        solutions = {}
+        for block in hr_blocks[2:]:
+            (solution_id, solution) = self.extract_reader_inner(block)
+            if solution is not None:
+                solutions[solution_id] = solution
+        return solutions
+
     def extract_analysis(self, meta: bool = False):
         """
         Extract analysis from HTML
@@ -163,69 +403,14 @@ class HeritageOutput:
             If True, include meta information, i.e, parse options, classes
             The default is False.
         """
-        if self.title.text != "Sanskrit Reader Companion":
-            self.logger.error("Invalid output page.")
+        if self.title.text == "Sanskrit Reader Companion":
+            # print(self.soup)
+            return self.extract_reader_output(meta)
+        elif self.title.text == "Sanskrit Segmenter Summary":
+            return self.extract_segmenter_output(meta)
+        else:
+            self.logger.error(f"Invalid output page: {self.title.text}")
             return None
-
-        hr_blocks = self.html.split("<hr>")
-        if len(hr_blocks) < 2:
-            self.logger.error("No solutions found.")
-            return None
-
-        solutions = {}
-        for block in hr_blocks[2:]:
-            if "Solution" not in block:
-                break
-
-            solution = {}
-
-            soup = bs4.BeautifulSoup(block, "html.parser")
-            first_span = soup.find("span")
-            solution_id = int(first_span.text.split()[1])
-
-            solution["id"] = solution_id
-            solution["words"] = []
-
-            if meta:
-                parser_url = first_span.find("a")["href"]
-                # TODO: Better parsing of options
-                parser_options = dict(
-                    [
-                        e.split("=")
-                        for e in re.split(
-                            r"&amp;|&|;", parser_url.split("?")[1]
-                        )
-                    ]
-                )
-                solution["parser_options"] = parser_options
-
-            tables = soup.find_all("table")
-            for table in tables:
-                if table.find("table"):
-                    word = {}
-                    word["text"] = table.previous_sibling.get_text()
-                else:
-                    # Inner table contains analysis and it occurs after
-                    # the original word
-                    self.logger.debug(table.get_text())
-                    analyses = self.parse_analysis(table)
-                    self.logger.debug(analyses)
-                    css_classes = table.get("class", [])
-                    if meta:
-                        word["classes"] = css_classes
-                    word["category"] = [
-                        HERITAGE_COLOURS.get(css_class.split("_back")[0], None)
-                        for css_class in css_classes
-                    ]
-                    word_analyses = []
-                    for analysis in analyses:
-                        word_copy = word.copy()
-                        word_copy.update(analysis)
-                        word_analyses.append(word_copy)
-                    solution["words"].append(word_analyses)
-
-            solutions[solution_id] = solution
-        return solutions
 
     def extract_parse(self):
         """Extract parse from HTML"""
@@ -279,9 +464,7 @@ class HeritageOutput:
                 rows = inner_table.find_all("tr")
                 output = []
                 for row in rows:
-                    cols = [
-                        col.get_text(" ").split() for col in row.find_all("th")
-                    ]
+                    cols = [col.get_text(" ").split() for col in row.find_all("th")]
                     output.append(cols)
                 forms[header][output[0][0][0]] = output
 
@@ -298,17 +481,146 @@ class HeritageOutput:
             if match:
                 return match.group(3)
 
-    def extract_lexicon_entry(self, word_id: str):
-        """Extract entry from a lexicon"""
+            from bs4 import BeautifulSoup
+
+    def parse_lexicon_entry(self, file_name, entry_tag):
+        """
+        Parses a Sanskrit Heritage lexicon entry from a BeautifulSoup tag.
+
+        :param entry_tag: BeautifulSoup Tag object from get_lexicon_entry()
+        :return: Dict containing structured lexicon data
+        """
+        if not entry_tag:
+            return None
+
+        # print("handling lexicon entry", entry_tag)
+
+        # Extract headword in Devanagari
+        headword = entry_tag.find("span", class_="Deva")
+        headword = headword.text.strip() if headword else None
+
+        # Extract transliterations (IAST)
+        term_refs = []
+        conj_forms = []
+        alt_forms = {}
+        for el in entry_tag.select("a.Blue"):
+            blue = el.text.strip()
+
+            red = None
+            green = None
+
+            for green_ in el.select("a.Green"):
+                green = green_
+
+            for red_ in el.select("a.Red"):
+                red = red_
+
+            if red:
+                conj_forms.append(blue)
+            elif green:
+                # alt_forms.append(blue)
+                term_refs.append(blue)
+                ref_parts = green.get("href").split("#")
+                green_page = None
+                green_term = None
+                if len(ref_parts) == 1:
+                    (t) = ref_parts
+                    green_page = file_name
+                    green_term = t
+                elif len(ref_parts) == 2:
+                    (p, t) = ref_parts
+                    green_page = p
+                    green_term = t
+                else:
+                    raise ValueError(f"Unexpected ref: {blue}")
+                alt_forms[blue] = (green_page, green_term)
+                # print(green) # should be a map[blue] = (file, ref)
+                # pass
+                # pass
+            else:
+                term_refs.append(blue)
+
+            # if blue.isdigit():
+            # else:
+
+        # these are all also blue...
+        alternative_forms = (
+            alt_forms  # [a.text.strip() for a in entry_tag.select("a.Green")]
+        )
+
+        # Extract grammatical category (gender, noun/verb, etc.)
+        gender = None
+        if entry_tag.find("a", class_="Red"):
+            gender_text = entry_tag.find("a", class_="Red").text.strip()
+            if "m." in gender_text:
+                gender = "masculine"
+            elif "n." in gender_text:
+                gender = "neuter"
+            elif "f." in gender_text:
+                gender = "feminine"
+
+        # Extract alternative forms (if any)
+
+        # Extract the definition
+        definition = " ".join(entry_tag.text.split()[1:])  # Skips the initial junk text
+
+        return {
+            "headword": headword,
+            "reference_terms": term_refs,
+            "conjugations": conj_forms,
+            "gender": gender,
+            "lexicon_terms": alternative_forms,
+            "definition": definition,
+        }
+
+    def find_lexicon_entry(self, file_name, entry_id):
+        """
+        Fetches a lexicon entry while checking alternative forms.
+        """
+        # First, try the direct lookup
         if "Monier-Williams Sanskrit-English" not in self.title.text:
             self.logger.error("Invalid dictionary page.")
             return None
-        marker = self.soup.find("a", attrs={"name": word_id})
-        parent = marker.find_parent()
-        # TODO: complete
+
+        marker = self.soup.find("a", attrs={"name": entry_id})
+
+        lexicon_entry = None
+
+        if marker:
+            lexicon_entry = marker.find_parent()
+
+        if lexicon_entry:
+            return lexicon_entry  # Found the entry
+
+        # Debugging log if direct lookup fails
+        # print(f"[DEBUG] Lexicon entry '{entry_id}' not found. Trying alternatives...")
+
+        # Attempt alternative markers
+        available_markers = [
+            tag.get("name") for tag in self.soup.find_all(attrs={"name": True})
+        ]
+
+        # Try numbered variants (e.g., "H_raa#1", "H_raa#2")
+        numbered_variants = [
+            m for m in available_markers if m.startswith(entry_id + "#")
+        ]
+
+        if numbered_variants:
+            # TODO: this means we are dropping the other variants # n+1...
+            best_match = numbered_variants[0]  # Use first available match
+            # print(f"[DEBUG] Using alternative lexicon marker: {best_match}")
+            return self.find_lexicon_entry(file_name, best_match)
+
+        raise ValueError(f"Lexicon entry for '{entry_id}' not found.")
+
+    def extract_lexicon_entry(self, file_name: str, word_id: str):
+        """Extract entry from a lexicon"""
+        parent = self.find_lexicon_entry(file_name, word_id)
+        # print("I found this parent do you like it?", parent)
+        return self.parse_lexicon_entry(file_name, parent)
 
     @staticmethod
-    def parse_analysis(table: bs4.element.Tag):
+    def parse_reader_analysis(table: bs4.element.Tag):
         """
         Parse analysis of a single word
         Analysis Format is: [root]{analysis_1 | analysis_2 | ..}
@@ -323,9 +635,11 @@ class HeritageOutput:
         analysies : list
         """
         # pattern = r'\[([^\]]*)\]\{([^\}]*)\}'
+
         pattern = r"\[(.*?)\]\{([^\}]*)\}"
         rows = table.find_all("tr")
         analyses = []
+        # print("time to analyze table", table)
         for row in rows:
             analysis = {}
             if row is None:
@@ -333,6 +647,8 @@ class HeritageOutput:
                 continue
 
             link = row.find("a")
+            # print("huh, I found this link?", link)
+            # print("you may be interested in the row:", row)
             if link is not None:
                 link_parts = link["href"].split("/")[-1].split("#")
                 file_name, word_id = link_parts[0], link_parts[1]
@@ -341,11 +657,12 @@ class HeritageOutput:
 
             match = re.match(pattern, row.get_text().strip(), flags=re.DOTALL)
             analysis["lexicon"] = (file_name, word_id)
-            analysis["root"] = match.group(1).split()[0].strip()
-            analysis["analyses"] = [
-                [abbrev.replace(".", "") for abbrev in an.split()]
-                for an in match.group(2).split("|")
-            ]
+            if match:
+                analysis["root"] = match.group(1).split()[0].strip()
+                analysis["analyses"] = [
+                    [abbrev.replace(".", "") for abbrev in an.split()]
+                    for an in match.group(2).split("|")
+                ]
             analyses.append(analysis)
         return analyses
 
@@ -365,7 +682,7 @@ class HeritagePlatform:
 
     INRIA_URL = "https://sanskrit.inria.fr/cgi-bin/SKT/"
     ACTIONS = {
-        "reader": {"shell": "reader", "web": "sktreader.cgi"},
+        "reader": {"shell": "reader", "web": "sktgraph2.cgi"},
         "parser": {"shell": "parser", "web": "sktparser.cgi"},
         "search": {"shell": "indexer", "web": "sktindex.cgi"},
         "search_easy": {"shell": "indexerd", "web": "sktsearch.cgi"},
@@ -406,7 +723,7 @@ class HeritagePlatform:
         self,
         base_dir: str = "",
         base_url: str = None,
-        method: str = "shell",
+        method: str = DEFAULT_METHOD,
         **kwargs,
     ):
         """
@@ -485,23 +802,28 @@ class HeritagePlatform:
 
         options = {
             "lex": self.get_lexicon(),
-            "cache": "t",  # Use Cache (t)rue, (f)alse
+            # "cache": "t",  # Use Cache (t)rue, (f)alse
             "st": opt_st,  # Sentence (t)rue, Word (f)alse
             "us": opt_us,  # Unsandhied (t)rue, (f)alse
             # if 'us' is 'f', "ca eva" is parsed as "ca_eva",
             # "tathā eva" as "tathā_eva" etc.
-            "cp": "t",  # Full Parser Strength (t)rue, (f)alse
             "t": self.get_option("t"),
-            "mode": "p",  # Parse Mode (p)arsing, (t)agging
             # Tagging does not prune any solutions
             "font": self.get_font(),
             # Output Display Font (deva)nagari (roma)n
             "topic": "",
             "corpmode": "",
             "corpdir": "",
-            "sentno": "",
+            "sentno": "980",  # what is this?
             "text": self.prepare_input(input_text),
         }
+
+        if self.method == "shell":
+            options["cp"] = "t"  # Full Parser Strength (t)rue, (f)alse
+            options["mode"] = "p"  # Parse Mode (p)arsing, (t)agging
+        else:
+            options["mode"] = "f"
+
         result = self.get_result("reader", options)
         if result is None:
             return None
@@ -509,6 +831,39 @@ class HeritagePlatform:
         output = HeritageOutput(result)
         # return output
         return output.extract_analysis(meta=meta)
+
+    def hydrate_sentence(self, analysis_result):
+        """
+        Expands a sentence analysis by adding full lexicon data.
+        """
+        cache = TreeScopedCache(self)
+        hydrated_result = {}
+
+        for token_id, token_data in analysis_result.items():
+            expanded_words = []
+            for word_group in token_data["words"]:
+                enriched_words = []
+                for word in word_group:
+                    lexicon_id, entry_id = word["lexicon"]
+
+                    # Fetch lexicon data for this word
+                    lexicon_entry = cache.get_lexicon_entry(lexicon_id, entry_id)
+
+                    # Merge lexicon data into the word structure
+                    enriched_word = {
+                        "text": word["text"],
+                        "root": word["root"],
+                        "category": word["category"],
+                        "lexicon": lexicon_entry,  # Inject full lexicon meaning
+                        "analyses": word["analyses"],
+                    }
+                    enriched_words.append(enriched_word)
+
+                expanded_words.append(enriched_words)
+
+            hydrated_result[token_id] = {"id": token_id, "words": expanded_words}
+
+        return hydrated_result
 
     # ----------------------------------------------------------------------- #
 
@@ -735,7 +1090,6 @@ class HeritagePlatform:
 
     ###########################################################################
 
-    @functools.lru_cache(maxsize=None)
     def get_lexicon_entry(self, file_name: str, word_id: str):
         if self.method == "shell":
             path = self.get_path("dictionary")
@@ -750,8 +1104,9 @@ class HeritagePlatform:
             self.logger.error(f"Invalid method: '{self.method}'.")
             return
 
+        # print("do you like content?", content)
         output = HeritageOutput(content)
-        return output.extract_lexicon_entry()
+        return output.extract_lexicon_entry(file_name, word_id)
 
     ###########################################################################
     # Fetch Result through Web or Shell
@@ -782,7 +1137,6 @@ class HeritagePlatform:
         query_url = f"{url}?{query_string}"
         return self.__get(query_url, attempts=attempts)
 
-    @functools.lru_cache(maxsize=None)
     def __get(self, query_url: str, attempts: int = 3):
         """
         Query web with exponential-backoff
@@ -810,7 +1164,7 @@ class HeritagePlatform:
                 self.logger.warning(f"Status Code: {r.status_code} (n = {n})")
 
                 fn = n
-                backoff = (2 ** fn) + random.random()
+                backoff = (2**fn) + random.random()
                 time.sleep(backoff)
                 r = requests.get(query_url)
 
@@ -818,16 +1172,13 @@ class HeritagePlatform:
                     self.logger.info(f"Resolved! (n = {n})")
                     break
             else:
-                self.logger.warning(
-                    f"Failed on '{query_url}' after {n} attempts."
-                )
+                self.logger.warning(f"Failed on '{query_url}' after {n} attempts.")
+        r.encoding = r.apparent_encoding
         return r.text
 
     # ----------------------------------------------------------------------- #
 
-    def get_result_from_shell(
-        self, path: str, options: dict, timeout: int = 30
-    ):
+    def get_result_from_shell(self, path: str, options: dict, timeout: int = 30):
         """
         Get results from the Heritage Platform's local installation via shell
 
@@ -851,7 +1202,6 @@ class HeritagePlatform:
         environment = frozendict({"QUERY_STRING": query_string})
         return self.__run(path, environment, timeout=timeout)
 
-    @functools.lru_cache(maxsize=None)
     def __run(self, path, environment: dict, timeout: int = 30):
         """
         Get results from shell through a subprocess call
@@ -872,12 +1222,19 @@ class HeritagePlatform:
             Result (HTML) obtained
         """
         alarm(timeout)
+        result = None
         try:
             result_header = "Content-Type: text/html\n\n"
-            result = subprocess.check_output(path, env=environment).decode(
-                "utf-8"
-            )
-            result = result[len(result_header) :]
+            # result = subprocess.check_output(path, env=environment).decode("utf-8")
+            cmd = sh.Command(path)
+            out = io.StringIO()
+            with out:
+                # print("Here is your cmd: ", cmd, environment)
+                result = cmd(_out=out, _err=sys.stderr, _env=environment)
+                # print("finished running yr cmd")
+                result = out.getvalue()
+                result = result[len(result_header) :]
+                # print("Here is your result:", type(result))
         except TimeoutError:
             self.logger.error("TimeoutError")
             return None
@@ -969,9 +1326,7 @@ class HeritagePlatform:
             self.options[opt_name] = opt_value
             return True
 
-        self.logger.warning(
-            f"Invalid value for option '{opt_name}': '{opt_value}'"
-        )
+        self.logger.warning(f"Invalid value for option '{opt_name}': '{opt_value}'")
         return False
 
     # ----------------------------------------------------------------------- #
@@ -1012,7 +1367,11 @@ class HeritagePlatform:
         # TODO: A better check may be checking for the required executables
         # * If the file exists
         # * If the file is executable
-        return os.path.isdir(self.scripts_dir)
+        if self.method == "shell":
+            return os.path.isdir(self.scripts_dir)
+        else:
+            # TODO: can validate http access
+            return True
 
     ###########################################################################
 

@@ -2,6 +2,9 @@
 Heritage.py
 ===========
 
+personal fork of: https://github.com/hrishikeshrt/heritage
+- adding new sentence segmenter & lexicon support
+
 .. image:: https://img.shields.io/pypi/v/heritage
         :target: https://pypi.python.org/pypi/heritage
 
